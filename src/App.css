@@ -1,0 +1,265 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.app-container {
+  display: flex;
+  width: 100%;
+  height: 100%;
+}
+
+.map-area {
+  position: relative;
+  flex: 1;
+  height: 100%;
+  transition: flex 0.3s ease;
+}
+
+.app-container.split .map-area {
+  flex: 1;
+}
+
+.street-view-panel {
+  width: 50%;
+  height: 100%;
+  flex-shrink: 0;
+  border-left: 2px solid #ccc;
+  transition: width 0.3s ease;
+}
+
+.street-view-pano {
+  width: 100%;
+  height: 100%;
+}
+
+/* Street View toggle button — top-right of map, below fullscreen */
+.sv-toggle-btn {
+  position: absolute;
+  top: 58px;
+  right: 10px;
+  z-index: 100;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.18);
+  border-radius: 2px;
+  width: 40px;
+  height: 52px;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+  transition: background 0.15s, border-color 0.15s, transform 0.15s;
+  overflow: hidden;
+}
+
+.sv-toggle-btn:hover {
+  background: #f5f5f5;
+  transform: scale(1.08);
+}
+
+.sv-toggle-btn.active {
+  background: #fde8e8;
+  border-color: #c0392b;
+}
+
+/* Consolidated tools button — below Street View button */
+.tools-group {
+  position: absolute;
+  top: 118px;
+  right: 10px;
+  z-index: 100;
+}
+
+.tools-main-btn {
+  width: 40px;
+  height: 40px;
+  background: #fff;
+  border: 1px solid rgba(0,0,0,0.18);
+  border-radius: 2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+  color: #555;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.tools-main-btn:hover { background: #f0f0f0; }
+
+.tools-main-btn.active {
+  background: #e8f0fe;
+  border-color: #1a73e8;
+  color: #1a73e8;
+}
+
+.tools-flyout {
+  position: absolute;
+  top: 0;
+  right: 48px;
+  background: #fff;
+  border: 1px solid rgba(0,0,0,0.18);
+  border-radius: 4px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 130px;
+}
+
+.tools-flyout-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  border-bottom: 1px solid rgba(0,0,0,0.07);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  color: #444;
+  text-align: left;
+  transition: background 0.12s;
+  white-space: nowrap;
+}
+
+.tools-flyout-item:last-child { border-bottom: none; }
+.tools-flyout-item:hover { background: #f5f5f5; }
+.tools-flyout-item.active {
+  background: #e8f0fe;
+  color: #1a73e8;
+  font-weight: 600;
+}
+
+/* Shared tool output display */
+.tool-display {
+  position: absolute;
+  top: 166px;
+  right: 10px;
+  z-index: 100;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 28px 8px 10px;
+  color: #fff;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 160px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+}
+
+.coord-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #555;
+  margin-top: 2px;
+}
+
+.ruler-hint {
+  color: #666;
+  font-size: 11px;
+  font-style: italic;
+}
+
+.val-coord { color: #1a5c3a; font-size: 13px; font-family: 'Consolas', monospace; font-weight: 700; }
+.val-ruler { color: #7a4a00; font-size: 13px; font-family: 'Consolas', monospace; font-weight: 700; }
+.val-area  { color: #4a1a7a; font-size: 13px; font-family: 'Consolas', monospace; font-weight: 700; }
+
+.coord-close {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  background: none;
+  border: none;
+  color: #999;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+  line-height: 1;
+}
+
+.coord-close:hover { color: #333; }
+
+.area-finish-btn {
+  margin-top: 4px;
+  background: #7c3aed;
+  border: none;
+  border-radius: 5px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 8px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.area-finish-btn:hover { background: #6d28d9; }
+
+.status-msg {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 200;
+  background: rgba(15, 20, 35, 0.92);
+  color: #fff;
+  padding: 16px 28px;
+  border-radius: 10px;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 15px;
+}
+
+.status-msg.error {
+  color: #fc8181;
+  border: 1px solid rgba(252, 129, 129, 0.3);
+}
+
+.controls-wrapper {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.controls-toggle {
+  background: rgba(15, 20, 35, 0.88);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: rgba(255, 255, 255, 0.8);
+  border-radius: 20px;
+  padding: 5px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+  order: 1;
+}
+
+.controls-toggle:hover {
+  background: rgba(99, 179, 237, 0.25);
+  color: #fff;
+}
+
+.controls-toggle.active {
+  order: 2;
+}
