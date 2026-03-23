@@ -1,20 +1,36 @@
 import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
-import { APIProvider, Map, useMap, type MapMouseEvent } from '@vis.gl/react-google-maps';
+import jsPDF from 'jspdf';
+import { APIProvider, Map, useMap, AdvancedMarker,  type MapMouseEvent } from '@vis.gl/react-google-maps';
 import DeckGL from '@deck.gl/react';
 import { MapView } from '@deck.gl/core';
+import type { Layer } from '@deck.gl/core';
+import { GeoJsonLayer } from '@deck.gl/layers';
 import { TripsLayer } from '@deck.gl/geo-layers';
+import { PathStyleExtension } from '@deck.gl/extensions';
 import { useTripsData } from './hooks/useTripsData';
+import { usePhotosData } from './hooks/usePhotosData';
 import { useAnimation } from './hooks/useAnimation';
 import { AnimationControls } from './components/AnimationControls';
-import type { AnimationSpeed, Trip } from './types';
+import { StoragePhoto } from './components/StoragePhoto';
+import type { AnimationSpeed, Trip, LocationRecord } from './types';
 import './App.css';
+
+import { WaterLateral } from "./components/WaterLateral";
+import { SewerLateral } from "./components/SewerLateral";
+import { Complaints } from "./components/complaints";
+import { wMain } from "./components/wMain";
+import { Photo } from "./components/Photo";
+
+import { sGravity } from "./components/sGravity";
+import { sMH } from "./components/sMH";
+import { Drain } from "./components/swDrain";
 
 const GOOGLE_MAPS_API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY ?? '';
 
 const VENDOR_COLORS: [number, number, number][] = [
-  [253, 128, 93],
-  [23, 184, 190],
-  [255, 203, 71],
+  [65,  105, 225], // vendor 0 — royal blue
+  [46,  139,  87], // vendor 1 — green
+  [255, 140,   0], // vendor 2 — orange
 ];
 
 const MAP_CENTER = { lat: 26.0, lng: -80.19 };
@@ -245,6 +261,225 @@ function StreetViewMapMarker({ marker }: { marker: SvMarkerData | null }) {
   return null;
 }
 
+function photoTypeColor(type: string | undefined | null): string {
+  switch (String(type ?? '').toLowerCase()) {
+    case 'water':      return '#4169e1'; // royal blue
+    case 'wastewater': return '#2e8b57'; // green
+    case 'stormwater': return '#ff8c00'; // orange
+    default:           return '#9e9e9e'; // grey
+  }
+}
+
+// Renders clickable dot markers for each location record on the map.
+function PhotoMarkers({
+  photos,
+  onPhotoClick,
+}: {
+  photos: LocationRecord[];
+  onPhotoClick: (photo: LocationRecord) => void;
+}) {
+  return photos.map(photo => (
+    <AdvancedMarker
+      key={String(photo.id ?? `${photo.lat},${photo.lng}`)}
+      position={{ lat: photo.lat, lng: photo.lng }}
+      onClick={() => onPhotoClick(photo)}
+    >
+      <div
+        className="photo-marker"
+        style={{
+          background: photoTypeColor(photo.type),
+          ...(photo.joint === false && ['wastewater', 'stormwater'].includes(String(photo.type ?? '').toLowerCase()) && { width: '24px', height: '24px' }),
+        }}
+      />
+    </AdvancedMarker>
+  ));
+}
+
+// Clickable markers for the Complaints layer (replaces deck.gl GeoJsonLayer for interactivity).
+type ComplaintProps = Record<string, unknown>;
+
+function ComplaintsMarkers({ onComplaintClick }: { onComplaintClick: (props: ComplaintProps) => void }) {
+  return Complaints.features.map(f => {
+    const [lng, lat] = f.geometry.coordinates as number[];
+    const resolved = f.properties.Status === 'true';
+    return (
+      <AdvancedMarker
+        key={f.id}
+        position={{ lat, lng }}
+        onClick={() => onComplaintClick(f.properties as ComplaintProps)}
+        title={f.properties.Address ?? ''}
+      >
+        <div className={`complaint-marker ${resolved ? 'resolved' : 'open'}`} />
+      </AdvancedMarker>
+    );
+  });
+}
+
+function ComplaintPopup({ properties, onClose }: { properties: ComplaintProps; onClose: () => void }) {
+  return (
+    <div className="complaint-popup">
+      <div className="complaint-popup-header">
+        <span className="complaint-popup-title">Complaint</span>
+        <button className="complaint-popup-close" onClick={onClose}>✕</button>
+      </div>
+      <table className="complaint-attr-table">
+        <tbody>
+          {Object.entries(properties).filter(([k]) => k !== 'FID' && k !== 'Id').map(([k, v]) => (
+            <tr key={k}>
+              <td className="complaint-attr-key">{k}</td>
+              <td className="complaint-attr-val">{String(v ?? '')}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// Hoverable AdvancedMarkers for the static Photo GeoJSON layer.
+const PHOTO_SKIP = new Set(['FID', 'Id']);
+type PhotoHoverState = { props: Record<string, unknown>; x: number; y: number } | null;
+
+function PhotoStaticMarkers({ onHover }: { onHover: (state: PhotoHoverState) => void }) {
+  return Photo.features.map((f, i) => {
+    const [lng, lat] = f.geometry.coordinates as number[];
+    const props = f.properties as Record<string, unknown>;
+    return (
+      <AdvancedMarker key={i} position={{ lat, lng }}>
+        <div
+          className="photo-static-marker"
+          onMouseEnter={e => onHover({ props, x: e.clientX, y: e.clientY })}
+          onMouseMove={e  => onHover({ props, x: e.clientX, y: e.clientY })}
+          onMouseLeave={() => onHover(null)}
+        />
+      </AdvancedMarker>
+    );
+  });
+}
+
+const SKIP_POPUP_KEYS = new Set(['lat', 'lng', 'photos', '__typename']);
+
+function formatAttrValue(value: unknown): string {
+  if (value === null || value === undefined) return '—';
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  return String(value);
+}
+
+// Full-screen lightbox with prev / next navigation
+function Lightbox({
+  urls,
+  startIndex,
+  onClose,
+}: {
+  urls: string[];
+  startIndex: number;
+  onClose: () => void;
+}) {
+  const [idx, setIdx] = useState(startIndex);
+
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+      if (e.key === 'ArrowRight') setIdx(i => Math.min(i + 1, urls.length - 1));
+      if (e.key === 'ArrowLeft') setIdx(i => Math.max(i - 1, 0));
+    };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [urls.length, onClose]);
+
+  return (
+    <div className="lightbox-overlay" onClick={onClose}>
+      {/* stop click-through on the image itself */}
+      <div className="lightbox-content" onClick={e => e.stopPropagation()}>
+        <StoragePhoto path={urls[idx]} alt={`photo ${idx + 1}`} className="lightbox-img" />
+        {urls.length > 1 && (
+          <div className="lightbox-counter">{idx + 1} / {urls.length}</div>
+        )}
+        {idx > 0 && (
+          <button className="lightbox-arrow lightbox-prev" onClick={() => setIdx(i => i - 1)}>&#8249;</button>
+        )}
+        {idx < urls.length - 1 && (
+          <button className="lightbox-arrow lightbox-next" onClick={() => setIdx(i => i + 1)}>&#8250;</button>
+        )}
+      </div>
+      <button className="lightbox-close" onClick={onClose}>✕</button>
+    </div>
+  );
+}
+
+// Floating card: photo gallery hero + attribute table below.
+function PhotoPopup({
+  photo,
+  onClose,
+}: {
+  photo: LocationRecord;
+  onClose: () => void;
+}) {
+  const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
+  const photoUrls: string[] = Array.isArray(photo.photos) ? photo.photos : [];
+
+  const attrs = Object.entries(photo).filter(
+    ([k, v]) => !SKIP_POPUP_KEYS.has(k) && v !== null && v !== undefined && v !== '',
+  );
+
+  return (
+    <>
+      <div className="photo-popup">
+        {/* Header */}
+        <div className="photo-popup-header">
+          <span className="photo-popup-title">
+            {photo.type ?? 'Location'}
+            {photoUrls.length > 0 && (
+              <span className="photo-popup-count"> · {photoUrls.length} photo{photoUrls.length !== 1 ? 's' : ''}</span>
+            )}
+          </span>
+          <button className="photo-popup-close" onClick={onClose} title="Close">✕</button>
+        </div>
+
+        {/* Photo gallery */}
+        {photoUrls.length > 0 && (
+          <div className="photo-gallery">
+            {photoUrls.map((url, i) => (
+              <div key={i} className="photo-thumb-wrap" onClick={() => setLightboxIdx(i)}>
+                <StoragePhoto path={url} alt={`photo ${i + 1}`} className="photo-thumb" />
+                <div className="photo-thumb-overlay">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="#fff" strokeWidth="2">
+                    <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                    <line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/>
+                  </svg>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Coordinates */}
+        <div className="photo-popup-coords">
+          <span>📍 {photo.lat.toFixed(6)}, {photo.lng.toFixed(6)}</span>
+        </div>
+
+        {/* Attribute table */}
+        {attrs.length > 0 && (
+          <table className="photo-attr-table">
+            <tbody>
+              {attrs.map(([key, value]) => (
+                <tr key={key}>
+                  <td className="photo-attr-key">{key}</td>
+                  <td className="photo-attr-val">{formatAttrValue(value)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {lightboxIdx !== null && (
+        <Lightbox urls={photoUrls} startIndex={lightboxIdx} onClose={() => setLightboxIdx(null)} />
+      )}
+    </>
+  );
+}
+
 interface DeckViewState {
   longitude: number;
   latitude: number;
@@ -255,7 +490,7 @@ interface DeckViewState {
 
 // Renders TripsLayer using DeckGL React component synced to the Google Maps camera.
 // This avoids GoogleMapsOverlay's WebGLOverlayView context-sharing issues in VECTOR mode.
-function DeckOverlay({ trips, currentTime }: { trips: Trip[]; currentTime: number }) {
+function DeckOverlay({ trips, currentTime, extraLayers }: { trips: Trip[]; currentTime: number; extraLayers: Layer[] }) {
   const map = useMap();
   const [viewState, setViewState] = useState<DeckViewState>({
     longitude: MAP_CENTER.lng,
@@ -296,7 +531,7 @@ function DeckOverlay({ trips, currentTime }: { trips: Trip[]; currentTime: numbe
     getTimestamps: d => d.timestamps,
     getColor: d => VENDOR_COLORS[d.vendor] ?? [255, 255, 255],
     opacity: 1,
-    widthMinPixels: 3,
+    widthMinPixels: 5,
     currentTime,
     fadeTrail: false,
   }), [trips, currentTime]);
@@ -305,7 +540,7 @@ function DeckOverlay({ trips, currentTime }: { trips: Trip[]; currentTime: numbe
     <DeckGL
       views={new MapView({ repeat: true })}
       viewState={viewState}
-      layers={[layer]}
+      layers={[...extraLayers, layer]}
       style={{ position: 'absolute', top: '0', left: '0', right: '0', bottom: '0', pointerEvents: 'none' }}
     />
   );
@@ -368,9 +603,20 @@ function StreetViewPanel({
 
 function MapApp() {
   const { trips, loading, error, timeRange } = useTripsData();
+  const { photos } = usePhotosData();
   const animation = useAnimation(timeRange);
   const [showControls, setShowControls] = useState(false);
   const [showStreetView, setShowStreetView] = useState(false);
+  const [showCostTracking, setShowCostTracking] = useState(false);
+  const [showDailyReport, setShowDailyReport] = useState(false);
+  const [showLayerPanel, setShowLayerPanel] = useState(false);
+  const [showComplaints, setShowComplaints] = useState(false);
+  const [showPhotoLayer, setShowPhotoLayer] = useState(false);
+  const [selectedDate, setSelectedDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [dailyLightbox, setDailyLightbox] = useState<{ urls: string[]; idx: number } | null>(null);
+  const [selectedPhoto, setSelectedPhoto] = useState<LocationRecord | null>(null);
+  const [selectedComplaint, setSelectedComplaint] = useState<ComplaintProps | null>(null);
+  const [hoveredPhotoStatic, setHoveredPhotoStatic] = useState<PhotoHoverState>(null);
   const [svPosition, setSvPosition] = useState<google.maps.LatLng | null>(null);
   const [svMarker, setSvMarker] = useState<SvMarkerData | null>(null);
   const [activeTool, setActiveTool] = useState<'coord' | 'ruler' | 'area' | null>(null);
@@ -392,6 +638,298 @@ function MapApp() {
     const sqFeet = sqMeters * 10.7639;
     return { sqFeet, acres: sqFeet / 43560, sqMiles: sqFeet / 27878400 };
   }, [areaPoints]);
+
+  // Static GeoJSON layers rendered in DeckGL
+  const layers01 = useMemo<Layer[]>(() => [
+    new GeoJsonLayer({
+      id: 'smh',
+      data: sMH as any,
+      stroked: true,
+      filled: true,
+      pointType: 'circle+text',
+      pickable: true,
+      getFillColor: [255, 255, 255, 0],
+      getLineColor: [71, 135, 120, 255],
+      getText: (f: any) => f.properties.Id,
+      getLineWidth: 0.5,
+      getPointRadius: 1,
+    }),
+    new GeoJsonLayer({
+      id: 'wmain',
+      data: wMain as any,
+      stroked: true,
+      filled: true,
+      pointType: 'circle+text',
+      pickable: true,
+      opacity: 0.5,
+      getFillColor: [211, 211, 211, 200],
+      getLineColor: [31, 81, 255, 255],
+      getText: (f: any) => f.properties.Id,
+      getLineWidth: 0.2,
+      getPointRadius: 3,
+      getDashArray: [10, 8],
+      dashJustified: true,
+      dashGapPickable: true,
+      extensions: [new PathStyleExtension({ dash: true })],
+    }),
+    new GeoJsonLayer({
+      id: 'sgravity',
+      data: sGravity as any,
+      stroked: true,
+      filled: true,
+      pointType: 'circle+text',
+      pickable: true,
+      opacity: 0.5,
+      getFillColor: [211, 211, 211, 200],
+      getLineColor: [50, 205, 50, 255],
+      getText: (f: any) => f.properties.Id,
+      getLineWidth: 0.2,
+      getPointRadius: 3,
+      getDashArray: [10, 8],
+      dashJustified: true,
+      dashGapPickable: true,
+      extensions: [new PathStyleExtension({ dash: true })],
+    }),
+    new GeoJsonLayer({
+      id: 'drain',
+      data: Drain as any,
+      stroked: true,
+      filled: true,
+      pointType: 'circle+text',
+      pickable: true,
+      opacity: 0.5,
+      getFillColor: [211, 211, 211, 200],
+      getLineColor: [255, 127, 80, 255],
+      getText: (f: any) => f.properties.Id,
+      getLineWidth: 0.2,
+      getPointRadius: 3,
+      getDashArray: [10, 8],
+      dashJustified: true,
+      dashGapPickable: true,
+      extensions: [new PathStyleExtension({ dash: true })],
+    }),
+    new GeoJsonLayer({
+      id: 'waterlateral',
+      data: WaterLateral as any,
+      stroked: true,
+      filled: true,
+      pointType: 'circle+text',
+      pickable: true,
+      opacity: 0.5,
+      getFillColor: [211, 211, 211, 200],
+      getLineColor: [31, 81, 255, 255],
+      getText: (f: any) => f.properties.Id,
+      getLineWidth: 0.2,
+      getPointRadius: 3,
+      getDashArray: [10, 8],
+      dashJustified: true,
+      dashGapPickable: true,
+      extensions: [new PathStyleExtension({ dash: true })],
+    }),
+    new GeoJsonLayer({
+      id: 'sewerlateral',
+      data: SewerLateral as any,
+      stroked: true,
+      filled: true,
+      pointType: 'circle+text',
+      pickable: true,
+      opacity: 0.5,
+      getFillColor: [211, 211, 211, 200],
+      getLineColor: [50, 205, 50, 255],
+      getText: (f: any) => f.properties.Id,
+      getLineWidth: 0.2,
+      getPointRadius: 3,
+      getDashArray: [10, 8],
+      dashJustified: true,
+      dashGapPickable: true,
+      extensions: [new PathStyleExtension({ dash: true })],
+    }),
+  ], []);
+
+  // Records for the selected date (Daily Report)
+  const dailyRecords = useMemo(
+    () => photos.filter(p => p.date === selectedDate),
+    [photos, selectedDate],
+  );
+
+  // PDF download for Daily Report
+  const downloadDailyPdf = useCallback(async () => {
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+    const pageW = doc.internal.pageSize.getWidth();
+    const margin = 14;
+    const colW = pageW - margin * 2;
+    let y = margin;
+
+    const LINE = 6;
+    const SECTION_GAP = 4;
+
+    const checkPage = (needed: number) => {
+      if (y + needed > doc.internal.pageSize.getHeight() - margin) {
+        doc.addPage();
+        y = margin;
+      }
+    };
+
+    // Title
+    doc.setFontSize(16);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Daily Report — ${selectedDate || 'No date selected'}`, margin, y);
+    y += LINE + 2;
+    doc.setFontSize(10);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(100);
+    doc.text(`${dailyRecords.length} record${dailyRecords.length !== 1 ? 's' : ''}`, margin, y);
+    doc.setTextColor(0);
+    y += LINE + SECTION_GAP;
+
+    // Resolve all photo URLs up front (getUrl for storage paths)
+    const { getUrl } = await import('aws-amplify/storage');
+    const resolveUrl = async (path: string): Promise<string | null> => {
+      if (path.startsWith('http://') || path.startsWith('https://')) return path;
+      try {
+        const result = await getUrl({ path, options: { expiresIn: 3600 } });
+        return result.url.href;
+      } catch { return null; }
+    };
+
+    for (const rec of dailyRecords) {
+      const attrRows: [string, string][] = [
+        ['Track',       String(rec.track       ?? '—')],
+        ['Type',        String(rec.type        ?? '—')],
+        ['Time',        String(rec.time        ?? '—')],
+        ['Diameter',    rec.diameter != null ? `${rec.diameter} in` : '—'],
+        ['Length',      rec.length   != null ? `${Number(rec.length).toFixed(1)} ft` : '—'],
+        ['Username',    String(rec.username    ?? '—')],
+        ['Description', String(rec.description ?? '—')],
+        ['Joint',       rec.joint != null ? (rec.joint ? 'Yes' : 'No') : '—'],
+        ['Lat / Lng',   `${rec.lat.toFixed(6)}, ${rec.lng.toFixed(6)}`],
+      ].filter(([, v]) => v !== '—') as [string, string][];
+
+      // Card header
+      checkPage(LINE * 2);
+      doc.setFillColor(240, 240, 240);
+      doc.rect(margin, y, colW, LINE + 2, 'F');
+      doc.setFontSize(11);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`${rec.type ?? 'Record'}${rec.track != null ? `  ·  Track ${rec.track}` : ''}${rec.time ? `  ·  ${rec.time}` : ''}`, margin + 2, y + LINE - 1);
+      y += LINE + 3;
+
+      // Attributes
+      doc.setFontSize(9);
+      doc.setFont('helvetica', 'normal');
+      for (const [k, v] of attrRows) {
+        checkPage(LINE);
+        doc.setFont('helvetica', 'bold');
+        doc.text(`${k}:`, margin + 2, y);
+        doc.setFont('helvetica', 'normal');
+        const wrapped = doc.splitTextToSize(v, colW - 40);
+        doc.text(wrapped, margin + 35, y);
+        y += LINE * wrapped.length;
+      }
+
+      // Photos
+      const recPhotos: string[] = Array.isArray(rec.photos) ? rec.photos : [];
+      if (recPhotos.length > 0) {
+        checkPage(LINE);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9);
+        doc.text('Photos:', margin + 2, y);
+        y += LINE;
+
+        for (const photoPath of recPhotos) {
+          const url = await resolveUrl(photoPath);
+          if (!url) continue;
+          try {
+            // Fetch image and convert to data URL
+            const resp = await fetch(url);
+            const blob = await resp.blob();
+            const dataUrl = await new Promise<string>((res, rej) => {
+              const reader = new FileReader();
+              reader.onload = () => res(reader.result as string);
+              reader.onerror = rej;
+              reader.readAsDataURL(blob);
+            });
+            // Fit image to page width
+            const imgW = colW;
+            const imgH = Math.min(80, imgW * 0.6);
+            checkPage(imgH + 4);
+            doc.addImage(dataUrl, 'JPEG', margin, y, imgW, imgH);
+            y += imgH + 4;
+          } catch { /* skip images that fail to load */ }
+        }
+      }
+
+      y += SECTION_GAP;
+      // Divider
+      checkPage(2);
+      doc.setDrawColor(200);
+      doc.line(margin, y, margin + colW, y);
+      y += SECTION_GAP;
+    }
+
+    doc.save(`daily-report-${selectedDate || 'unknown'}.pdf`);
+  }, [dailyRecords, selectedDate]);
+
+  // MH counts (joint === false)
+  const mhWastewater = useMemo(
+    () => photos.filter(p => String(p.type ?? '').toLowerCase() === 'wastewater' && p.joint === false).length,
+    [photos],
+  );
+  const mhStormwater = useMemo(
+    () => photos.filter(p => String(p.type ?? '').toLowerCase() === 'stormwater' && p.joint === false).length,
+    [photos],
+  );
+
+  // Aggregate length by type only (Table 3)
+  const costRows3 = useMemo(() => {
+    type AggRow3 = { type: string; count: number; totalLength: number };
+    const agg: Record<string, AggRow3> = {};
+    for (const p of photos) {
+      const type   = String(p.type ?? '—');
+      const length = Number(p.length ?? 0);
+      if (!agg[type]) agg[type] = { type, count: 0, totalLength: 0 };
+      agg[type].count       += 1;
+      agg[type].totalLength += length;
+    }
+    return Object.values(agg).sort((a, b) => a.type.localeCompare(b.type));
+  }, [photos]);
+
+  // Aggregate length by track × type (Table 2)
+  const costRows2 = useMemo(() => {
+    type AggRow2 = { track: number; type: string; count: number; totalLength: number };
+    const agg: Record<string, AggRow2> = {};
+    for (const p of photos) {
+      const track  = p.track ?? 0;
+      const type   = String(p.type ?? '—');
+      const length = Number(p.length ?? 0);
+      const key = `${track}|${type}`;
+      if (!agg[key]) agg[key] = { track, type, count: 0, totalLength: 0 };
+      agg[key].count       += 1;
+      agg[key].totalLength += length;
+    }
+    return Object.values(agg).sort(
+      (a, b) => a.track - b.track || a.type.localeCompare(b.type),
+    );
+  }, [photos]);
+
+  // Aggregate length by track × type × diameter (Table 1)
+  const costRows = useMemo(() => {
+    type AggRow = { track: number; type: string; diameter: number; count: number; totalLength: number };
+    const agg: Record<string, AggRow> = {};
+    for (const p of photos) {
+      const track    = p.track    ?? 0;
+      const type     = String(p.type     ?? '—');
+      const diameter = p.diameter ?? 0;
+      const length   = Number(p.length   ?? 0);
+      const key = `${track}|${type}|${diameter}`;
+      if (!agg[key]) agg[key] = { track, type, diameter, count: 0, totalLength: 0 };
+      agg[key].count       += 1;
+      agg[key].totalLength += length;
+    }
+    return Object.values(agg).sort(
+      (a, b) => a.track - b.track || a.type.localeCompare(b.type) || a.diameter - b.diameter,
+    );
+  }, [photos]);
 
   const selectTool = useCallback((tool: 'coord' | 'ruler' | 'area') => {
     setActiveTool(prev => {
@@ -444,14 +982,14 @@ function MapApp() {
         <Map
           defaultCenter={MAP_CENTER}
           defaultZoom={16.5}
-          mapTypeId="roadmap"
+          mapId="aab5d655d42e65dc77f350e8"
           disableDefaultUI={false}
           gestureHandling="greedy"
           renderingType="VECTOR"
           tiltInteractionEnabled={true}
           headingInteractionEnabled={true}
           rotateControl={true}
-          defaultTilt={45}
+          defaultTilt={0}
           defaultHeading={0}
           streetViewControlOptions={{ position: 6 }}
           onClick={handleMapClick as (e: MapMouseEvent) => void}
@@ -462,10 +1000,334 @@ function MapApp() {
           {showStreetView && <StreetViewMapMarker marker={svMarker} />}
           {activeTool === 'ruler' && <RulerOverlay points={rulerPoints} />}
           {activeTool === 'area' && <AreaOverlay points={areaPoints} finished={areaFinished} />}
+          <PhotoMarkers photos={photos} onPhotoClick={setSelectedPhoto} />
+          {showComplaints && <ComplaintsMarkers onComplaintClick={setSelectedComplaint} />}
+          {showPhotoLayer && <PhotoStaticMarkers onHover={setHoveredPhotoStatic} />}
         </Map>
 
-        {!loading && trips.length > 0 && (
-          <DeckOverlay trips={trips} currentTime={animation.currentTime} />
+        <DeckOverlay trips={trips} currentTime={animation.currentTime} extraLayers={layers01} />
+
+        {selectedPhoto && (
+          <PhotoPopup photo={selectedPhoto} onClose={() => setSelectedPhoto(null)} />
+        )}
+
+        {selectedComplaint && (
+          <ComplaintPopup properties={selectedComplaint} onClose={() => setSelectedComplaint(null)} />
+        )}
+
+        {/* Photo-static hover tooltip (fixed to viewport coords) */}
+        {hoveredPhotoStatic && (() => {
+          const name = hoveredPhotoStatic.props.Name as string | undefined;
+          const imgSrc = name
+            ? `https://washington-utilities-files.s3.us-east-2.amazonaws.com/field-photos/${name}.png`
+            : null;
+          return (
+            <div
+              className="photo-hover-tooltip"
+              style={{ left: hoveredPhotoStatic.x + 14, top: hoveredPhotoStatic.y - 10 }}
+            >
+              {imgSrc && (
+                <img src={imgSrc} alt={name} className="photo-hover-img" />
+              )}
+              {Object.entries(hoveredPhotoStatic.props)
+                .filter(([k]) => !PHOTO_SKIP.has(k))
+                .map(([k, v]) => (
+                  <div key={k} className="photo-hover-row">
+                    <span className="photo-hover-key">{k}</span>
+                    <span className="photo-hover-val">{String(v ?? '')}</span>
+                  </div>
+                ))}
+            </div>
+          );
+        })()}
+
+        {/* Top-centre button group */}
+        <div className="top-center-btns">
+          {/* Layer toggle embedded in top bar */}
+          <div className="layer-toggle-group">
+            <button
+              className={`top-center-btn ${showLayerPanel ? 'active' : ''}`}
+              onClick={() => setShowLayerPanel(v => !v)}
+              title="Toggle layers"
+            >
+              <svg viewBox="0 0 20 20" width="14" height="14" fill="currentColor" style={{ verticalAlign: 'middle', marginRight: 4 }}>
+                <rect x="1" y="3"  width="18" height="2.5" rx="1"/>
+                <rect x="1" y="9"  width="18" height="2.5" rx="1"/>
+                <rect x="1" y="15" width="18" height="2.5" rx="1"/>
+              </svg>
+              Layers
+            </button>
+
+            {showLayerPanel && (
+              <div className="layer-panel">
+                <label className="layer-panel-item">
+                  <input
+                    type="checkbox"
+                    checked={showComplaints}
+                    onChange={e => {
+                      setShowComplaints(e.target.checked);
+                      if (!e.target.checked) setSelectedComplaint(null);
+                    }}
+                  />
+                  <span className="layer-panel-dot" style={{ background: '#50c878' }} />
+                  <span className="layer-panel-dot" style={{ background: '#dc143c' }} />
+                  Complaints
+                </label>
+                <label className="layer-panel-item">
+                  <input
+                    type="checkbox"
+                    checked={showPhotoLayer}
+                    onChange={e => {
+                      setShowPhotoLayer(e.target.checked);
+                      if (!e.target.checked) setHoveredPhotoStatic(null);
+                    }}
+                  />
+                  <span className="layer-panel-dot" style={{ background: '#cc5500' }} />
+                  Photo Layer
+                </label>
+              </div>
+            )}
+          </div>
+
+          <button
+            className={`top-center-btn ${showCostTracking ? 'active' : ''}`}
+            onClick={() => setShowCostTracking(v => !v)}
+          >
+            💰 Cost Tracking
+          </button>
+          <button
+            className={`top-center-btn ${showDailyReport ? 'active' : ''}`}
+            onClick={() => setShowDailyReport(v => !v)}
+          >
+            📅 Daily Report
+          </button>
+        </div>
+
+        {/* Cost Tracking modal */}
+        {showCostTracking && (
+          <div className="cost-tracking-overlay" onClick={() => setShowCostTracking(false)}>
+            <div className="cost-tracking-modal" onClick={e => e.stopPropagation()}>
+              <div className="cost-tracking-header">
+                <span className="cost-tracking-title">Cost Tracking</span>
+                <button className="cost-tracking-close" onClick={() => setShowCostTracking(false)}>✕</button>
+              </div>
+              <div className="cost-tracking-body">
+                <p className="cost-table-label">Table 1 — Length by Track / Type / Diameter</p>
+                <div className="cost-table-wrap">
+                  <table className="cost-table">
+                    <thead>
+                      <tr>
+                        <th>Track</th>
+                        <th>Type</th>
+                        <th>Diameter (in)</th>
+                        <th>Count</th>
+                        <th>Total Length (ft)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {costRows.map(row => (
+                        <tr key={`${row.track}|${row.type}|${row.diameter}`}>
+                          <td>{row.track}</td>
+                          <td>{row.type}</td>
+                          <td>{row.diameter}</td>
+                          <td>{row.count}</td>
+                          <td>{row.totalLength.toFixed(1)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr>
+                        <td colSpan={3} className="cost-table-total-label">Total</td>
+                        <td>{costRows.reduce((s, r) => s + r.count, 0)}</td>
+                        <td>{costRows.reduce((s, r) => s + r.totalLength, 0).toFixed(1)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+
+                {/* Table 2 */}
+                <p className="cost-table-label" style={{ marginTop: '22px' }}>Table 2 — Length by Track / Type</p>
+                <div className="cost-table-wrap">
+                  <table className="cost-table">
+                    <thead>
+                      <tr>
+                        <th>Track</th>
+                        <th>Type</th>
+                        <th>Count</th>
+                        <th>Total Length (ft)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {costRows2.map(row => (
+                        <tr key={`${row.track}|${row.type}`}>
+                          <td>{row.track}</td>
+                          <td>{row.type}</td>
+                          <td>{row.count}</td>
+                          <td>{row.totalLength.toFixed(1)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr>
+                        <td colSpan={2} className="cost-table-total-label">Total</td>
+                        <td>{costRows2.reduce((s, r) => s + r.count, 0)}</td>
+                        <td>{costRows2.reduce((s, r) => s + r.totalLength, 0).toFixed(1)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+
+                {/* Table 3 */}
+                <p className="cost-table-label" style={{ marginTop: '22px' }}>Table 3 — Length by Type</p>
+                <div className="cost-table-wrap">
+                  <table className="cost-table">
+                    <thead>
+                      <tr>
+                        <th>Type</th>
+                        <th>Count</th>
+                        <th>Total Length (ft)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {costRows3.map(row => (
+                        <tr key={row.type}>
+                          <td>{row.type}</td>
+                          <td>{row.count}</td>
+                          <td>{row.totalLength.toFixed(1)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot>
+                      <tr>
+                        <td className="cost-table-total-label">Total</td>
+                        <td>{costRows3.reduce((s, r) => s + r.count, 0)}</td>
+                        <td>{costRows3.reduce((s, r) => s + r.totalLength, 0).toFixed(1)}</td>
+                      </tr>
+                    </tfoot>
+                  </table>
+                </div>
+
+                {/* MH counts */}
+                <div className="cost-mh-counts">
+                  <div className="cost-mh-row">
+                    Number of MH in Wastewater System = <strong>{mhWastewater}</strong>
+                  </div>
+                  <div className="cost-mh-row">
+                    Number of MH in Stormwater System = <strong>{mhStormwater}</strong>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Daily Report modal */}
+        {showDailyReport && (
+          <div className="daily-overlay" onClick={() => { setShowDailyReport(false); setDailyLightbox(null); }}>
+            <div className="daily-modal" onClick={e => e.stopPropagation()}>
+
+              {/* Header */}
+              <div className="daily-header">
+                <span className="daily-title">📅 Daily Report</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <button
+                    className="daily-download-btn"
+                    onClick={downloadDailyPdf}
+                    disabled={dailyRecords.length === 0}
+                    title="Download PDF"
+                  >
+                    ⬇ Download
+                  </button>
+                  <button className="daily-close" onClick={() => { setShowDailyReport(false); setDailyLightbox(null); }}>✕</button>
+                </div>
+              </div>
+
+              {/* Date picker */}
+              <div className="daily-datepicker-row">
+                <label className="daily-date-label" htmlFor="daily-date-input">Date</label>
+                <input
+                  id="daily-date-input"
+                  type="date"
+                  className="daily-date-input"
+                  value={selectedDate}
+                  onChange={e => setSelectedDate(e.target.value)}
+                />
+                <span className="daily-record-count">
+                  {dailyRecords.length} record{dailyRecords.length !== 1 ? 's' : ''}
+                </span>
+              </div>
+
+              {/* Records */}
+              <div className="daily-body">
+                {dailyRecords.length === 0 ? (
+                  <div className="daily-empty">No records found for this date.</div>
+                ) : (
+                  dailyRecords.map(rec => {
+                    const recPhotos: string[] = Array.isArray(rec.photos) ? rec.photos : [];
+                    const attrRows: [string, string][] = [
+                      ['Track',       String(rec.track       ?? '—')],
+                      ['Type',        String(rec.type        ?? '—')],
+                      ['Time',        String(rec.time        ?? '—')],
+                      ['Diameter',    rec.diameter != null ? `${rec.diameter} in` : '—'],
+                      ['Length',      rec.length   != null ? `${Number(rec.length).toFixed(1)} ft` : '—'],
+                      ['Username',    String(rec.username    ?? '—')],
+                      ['Description', String(rec.description ?? '—')],
+                      ['Joint',       rec.joint != null ? (rec.joint ? 'Yes' : 'No') : '—'],
+                      ['Lat / Lng',   `${rec.lat.toFixed(6)}, ${rec.lng.toFixed(6)}`],
+                    ].filter(([, v]) => v !== '—') as [string, string][];
+
+                    return (
+                      <div key={String(rec.id)} className="daily-record-card">
+                        {/* Card header */}
+                        <div className="daily-card-header">
+                          <span className="daily-card-type">{rec.type ?? 'Record'}</span>
+                          {rec.track != null && <span className="daily-card-tag">Track {rec.track}</span>}
+                          {rec.time  && <span className="daily-card-tag">{rec.time}</span>}
+                        </div>
+
+                        {/* Attributes */}
+                        <table className="daily-attr-table">
+                          <tbody>
+                            {attrRows.map(([k, v]) => (
+                              <tr key={k}>
+                                <td className="daily-attr-key">{k}</td>
+                                <td className="daily-attr-val">{v}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+
+                        {/* Photos */}
+                        {recPhotos.length > 0 && (
+                          <div className="daily-photo-strip">
+                            {recPhotos.map((url, i) => (
+                              <div
+                                key={i}
+                                className="daily-photo-wrap"
+                                onClick={() => setDailyLightbox({ urls: recPhotos, idx: i })}
+                              >
+                                <StoragePhoto path={url} alt={`photo ${i + 1}`} className="daily-photo-thumb" />
+                                <div className="daily-photo-overlay">🔍</div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Daily Report lightbox */}
+        {dailyLightbox && (
+          <Lightbox
+            urls={dailyLightbox.urls}
+            startIndex={dailyLightbox.idx}
+            onClose={() => setDailyLightbox(null)}
+          />
         )}
 
         <button
@@ -474,33 +1336,14 @@ function MapApp() {
           title={showStreetView ? 'Close Street View' : 'Open Street View'}
         >
           {showStreetView ? (
-            <svg viewBox="0 0 40 40" width="36" height="36" xmlns="http://www.w3.org/2000/svg">
+            /* Close ✕ */
+            <svg viewBox="0 0 40 40" width="28" height="28" xmlns="http://www.w3.org/2000/svg">
               <line x1="10" y1="10" x2="30" y2="30" stroke="#c0392b" strokeWidth="4" strokeLinecap="round"/>
               <line x1="30" y1="10" x2="10" y2="30" stroke="#c0392b" strokeWidth="4" strokeLinecap="round"/>
             </svg>
           ) : (
-            <svg viewBox="0 0 48 60" width="32" height="40" xmlns="http://www.w3.org/2000/svg">
-              <circle cx="24" cy="8" r="7" fill="#f5cba7" stroke="#c0824a" strokeWidth="1.2"/>
-              <ellipse cx="24" cy="3" rx="9" ry="2.5" fill="#5d4037"/>
-              <rect x="18" y="0.5" width="12" height="4" rx="1.5" fill="#5d4037"/>
-              <circle cx="21" cy="8.5" r="2.5" fill="none" stroke="#444" strokeWidth="1"/>
-              <circle cx="27" cy="8.5" r="2.5" fill="none" stroke="#444" strokeWidth="1"/>
-              <line x1="23.5" y1="8.5" x2="24.5" y2="8.5" stroke="#444" strokeWidth="1"/>
-              <line x1="18.5" y1="8.5" x2="17" y2="9.2" stroke="#444" strokeWidth="1"/>
-              <line x1="29.5" y1="8.5" x2="31" y2="9.2" stroke="#444" strokeWidth="1"/>
-              <path d="M21 11.5 Q24 13 27 11.5" fill="none" stroke="#7b5e3a" strokeWidth="1.2" strokeLinecap="round"/>
-              <path d="M24 15 Q20 22 19 30" fill="none" stroke="#2c6fad" strokeWidth="4.5" strokeLinecap="round"/>
-              <line x1="21" y1="18" x2="14" y2="26" stroke="#2c6fad" strokeWidth="3" strokeLinecap="round"/>
-              <line x1="22" y1="18" x2="29" y2="22" stroke="#2c6fad" strokeWidth="3" strokeLinecap="round"/>
-              <line x1="29" y1="22" x2="34" y2="36" stroke="#8B6914" strokeWidth="2.2" strokeLinecap="round"/>
-              <ellipse cx="34.5" cy="37" rx="2" ry="1" fill="#8B6914"/>
-              <line x1="19" y1="30" x2="14" y2="44" stroke="#1a237e" strokeWidth="3.5" strokeLinecap="round"/>
-              <line x1="14" y1="44" x2="10" y2="50" stroke="#1a237e" strokeWidth="3" strokeLinecap="round"/>
-              <line x1="19" y1="30" x2="23" y2="44" stroke="#1a237e" strokeWidth="3.5" strokeLinecap="round"/>
-              <line x1="23" y1="44" x2="26" y2="50" stroke="#1a237e" strokeWidth="3" strokeLinecap="round"/>
-              <ellipse cx="9" cy="51" rx="4" ry="2" fill="#333"/>
-              <ellipse cx="26.5" cy="51" rx="4" ry="2" fill="#333"/>
-            </svg>
+            /* Taiji (Yin-Yang) symbol */
+            <span style={{ fontSize: '34px', lineHeight: 1, display: 'block' }}>☯</span>
           )}
         </button>
 

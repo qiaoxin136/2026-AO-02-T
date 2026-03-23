@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm install:*)",
+      "Bash(npx tsc:*)",
+      "Bash(gh api:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:main.d3mlvs5vwnhv86.amplifyapp.com)",
+      "Bash(npm run:*)",
+      "Bash(npm list:*)"
+    ]
+  }
+}
