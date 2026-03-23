@@ -1,1 +1,1 @@
-# 2026-AO-02-T
+2026 Anthropic Google Map Template No. 2
